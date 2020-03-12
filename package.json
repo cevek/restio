@@ -1,0 +1,22 @@
+{
+    "name": "restio",
+    "version": "1.0.0",
+    "description": "",
+    "typings": "typings",
+    "main": "index.js",
+    "scripts": {
+        "build": "rm -rf typings && tsc",
+        "prepublish": "npm run build",
+        "test": ""
+    },
+    "keywords": [
+        "rest api"
+    ],
+    "author": "cevek",
+    "license": "ISC",
+    "dependencies": {
+        "assertio": "^1.0.23",
+        "@types/react": "^16.9.23",
+        "react": "^16.13.0"
+    }
+}

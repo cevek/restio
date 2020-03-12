@@ -1,0 +1,13 @@
+{
+    "compilerOptions": {
+        "strict": true,
+        "target": "es2019",
+        "module": "ESNext",
+        "moduleResolution": "node",
+        "declarationDir": "typings",
+        "declaration": true,
+        "declarationMap": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true
+    }
+}
