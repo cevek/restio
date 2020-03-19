@@ -36,8 +36,29 @@ const ApiFactory = createApiFactory()
 
 const {ApiProvider, useSuspense, useMutation, useApi} = createReactApiTools(ApiFactory);
 
+// your fetch, should returns {status: number; data: unknown} | {status: 'ConnectionFailed'; data: Error} | {status: 'JsonParseError'; data: Error} 
+// promise error is not handled
+
+const fetcher = (req: RequestData): Promise<FetchResponse> =>
+    fetch('https://youdomain/' + req.url, {
+        method: req.method,
+        headers: {
+            'Content-Type': 'application/json',
+            'api-key': '.......',
+        },
+        body: req.method === 'get' ? undefined : JSON.stringify(req.json),
+    }).then(
+        response =>
+            response.json().then(
+                json => ({status: response.status, data: json}),
+                err => (response.ok ? {status: 'JsonParseError', data: err} : {status: response.status, data: err}),
+            ),
+        err => ({status: 'ConnectionFailed', data: err}),
+    );
+
+
 function App() {
-    const api = ApiFactory()
+    const api = ApiFactory({fetcher: fetcher});        
     <ApiProvider api={api}>
        Foo
     </ApiProvider>
