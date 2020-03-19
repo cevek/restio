@@ -213,6 +213,8 @@ const restApiFactory = createApiFactory()
                 // delete profile cache
                 // will reload all components which use useSuspense().getProfile()
                 r.cache.deleteByName('getProfile');
+                // you can also use predicate to specify which requests you want to delete
+                //r.cache.deleteByName('getUserProfile', p => p.params.userId === '1')
             },
         },
         logout: {
@@ -227,7 +229,7 @@ const {ApiProvider, useSuspense, useMutation, useApi} = createReactApiTools(rest
 function App() {
     const api = restApiFactory({
         fetcher(req) {
-            return fakeFetch(req.method, req.url, req.json);
+            return fakeFetch(req.method, req.url, req.body);
             /* or use es6 fetch/axios or anything you want */
             // return fetch('https://youdomain/' + req.url, {
             //     method: req.method,
@@ -243,7 +245,7 @@ function App() {
             //             err =>
             //                 response.ok ? {status: 'JsonParseError', data: err} : {status: response.status, data: err},
             //         ),
-            //     err => ({status: 'Failed', data: err}),
+            //     err => ({status: 'ConnectionFailed', data: err}),
             // );
         },
     });

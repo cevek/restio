@@ -1,7 +1,6 @@
 import * as React from 'react';
 type QueryCache = Map<string, QueryCacheItem>;
-type QueryCacheItem<Req extends RequestData<unknown> = RequestData, Name = string> = {
-    name: Name;
+type QueryCacheItem<Req extends RequestData = RequestData> = {
     response: Box | null;
     error: ApiError | Error | null;
     request: Req;
@@ -29,13 +28,13 @@ type Context = {
 
 type ReqMapQuery = {
     [key: string]: {
-        request: (params?: any) => RequestData;
+        request: (params?: any) => RawRequest;
         response: ResMethods<any, any>;
     };
 };
 type ReqMapMut = {
     [key: string]: {
-        request: (params?: any) => RequestData;
+        request: (params?: any) => RawRequest;
         response: ResMethods<any, any>;
         effectOnSuccess?: () => void;
     };
@@ -90,35 +89,38 @@ export type Api<Q extends ReqMapQuery, M extends ReqMapQuery> = {
 type Cache<Q extends ReqMapQuery> = {
     clearAll(): void;
     values(): QueryCacheItem[];
-    deleteBy(
-        predicate: (
-            params: {
-                [P in keyof Q]: QueryCacheItem<ReturnType<Q[P]['response']['ResultType']>, P>;
-            }[keyof Q],
-        ) => boolean,
+    deleteByName<N extends Extract<keyof Q, string>>(
+        name: N,
+        predicate?: (request: RequestData<N, Parameters<Q[N]['request']>[0]>) => boolean,
     ): void;
-    deleteByName(name: keyof Q): void;
     serialize(): object;
 };
 
 type Method = 'get' | 'put' | 'delete' | 'post';
-export type RequestData<Meta = unknown> = {
+export type RequestData<Name extends string = string, Params = unknown> = {
+    name: Name;
     method: Method;
     url: string;
-    json: object | null;
-    meta: Meta;
+    body: unknown;
+    params: Params;
+    ttl: number | null;
+};
+type RawRequest = {
+    method: Method;
+    url: string;
+    body: unknown;
     ttl: number | null;
 };
 
 type ReqMethods = {
-    get: <Meta>(
+    get: (
         url: string,
         queryParams?: {[key: string]: number | string | boolean} | null,
-        other?: Other<Meta>,
-    ) => RequestData<Meta>;
-    post: <Meta>(url: string, params: object | null, other?: Other<Meta>) => RequestData<Meta>;
-    put: <Meta>(url: string, params: object | null, other?: Other<Meta>) => RequestData<Meta>;
-    delete: <Meta>(url: string, params: object | null, other?: Other<Meta>) => RequestData<Meta>;
+        other?: OtherParams,
+    ) => RawRequest;
+    post: (url: string, params: object | null, other?: OtherParams) => RawRequest;
+    put: (url: string, params: object | null, other?: OtherParams) => RawRequest;
+    delete: (url: string, params: object | null, other?: OtherParams) => RawRequest;
 };
 
 type FetcherResult = {originalResponse: ResponseData; box: Box};
@@ -194,11 +196,11 @@ export function createApiFactory() {
                                 const queries = {} as Api<Q, M>['query'];
                                 for (const key in methods) {
                                     const k = key as keyof Q;
-                                    const createRequest = methods[key].request;
+                                    const getRawRequest = methods[key].request;
                                     const matchers = methods[key].response.matchers;
                                     queries[k] = params => {
-                                        const req = createRequest(params);
-                                        const res = query(key, req, context, matchers);
+                                        const req = createRequest(getRawRequest(params), key, params);
+                                        const res = query(req, context, matchers);
                                         if (res.kind === 'error') {
                                             return Promise.reject(res.value);
                                         }
@@ -216,11 +218,11 @@ export function createApiFactory() {
                                     const suspense = {} as ReturnType<Api<Q, M>['suspense']>;
                                     for (const key in methods) {
                                         const k = key as keyof Q;
-                                        const createRequest = methods[key].request;
+                                        const getRawRequest = methods[key].request;
                                         const matchers = methods[key].response.matchers;
                                         suspense[k] = params => {
-                                            const req = createRequest(params);
-                                            const res = query(key, req, context, matchers);
+                                            const req = createRequest(getRawRequest(params), key, params);
+                                            const res = query(req, context, matchers);
                                             if (res.kind === 'error' || res.kind === 'promise') {
                                                 throw res.value;
                                             }
@@ -242,11 +244,11 @@ export function createApiFactory() {
                                 const mutation = {} as Api<Q, M>['mutation'];
                                 for (const key in methods) {
                                     const k = key as keyof M;
-                                    const createRequest = methods[key].request;
+                                    const getRawRequest = methods[key].request;
                                     const effect = methods[key].effectOnSuccess;
                                     const matchers = methods[key].response.matchers;
                                     mutation[k] = params => {
-                                        const req = createRequest(params);
+                                        const req = createRequest(getRawRequest(params), key, params);
                                         return context.fetch(req).then(({box, originalResponse}) => {
                                             const handler = matchers.find(m => m.on === box.type);
                                             if (handler !== undefined) {
@@ -279,16 +281,12 @@ export function createApiFactory() {
                                         queryCache.forEach(item => callCacheDeleteListener(item));
                                         return queryCache.clear();
                                     },
-                                    deleteBy: predicate =>
+                                    deleteByName: (name, predicate) =>
                                         queryCache.forEach((item, key) => {
-                                            if (predicate(cast(item))) {
-                                                queryCache.delete(key);
-                                                callCacheDeleteListener(item);
-                                            }
-                                        }),
-                                    deleteByName: name =>
-                                        queryCache.forEach((item, key) => {
-                                            if (item.name === name) {
+                                            if (
+                                                item.request.name === name &&
+                                                (!predicate || predicate(cast(item.request)))
+                                            ) {
                                                 queryCache.delete(key);
                                                 callCacheDeleteListener(item);
                                             }
@@ -310,19 +308,33 @@ export function deserializeCache(obj: unknown) {
     return new Map<string, QueryCacheItem>(cast(obj));
 }
 
-type Other<Meta> = {meta?: Meta; ttl?: number};
-function createRequest<Meta>(
+type OtherParams = {ttl?: number};
+function createRawRequest(
     method: 'get' | 'put' | 'delete' | 'post',
     url: string,
-    params: object | null,
-    other?: Other<Meta>,
-): RequestData<Meta> {
+    params: object | null | undefined,
+    other?: OtherParams,
+): RawRequest {
     return {
         method: method,
         url: url,
-        json: params,
-        meta: cast(other === undefined ? null : other.meta),
+        body: params,
         ttl: other !== undefined && other.ttl !== undefined ? other.ttl : null,
+    };
+}
+
+function createRequest<Name extends string, Params>(
+    req: RawRequest,
+    name: Name,
+    params: Params,
+): RequestData<Name, Params> {
+    return {
+        body: req.body,
+        method: req.method,
+        name: name,
+        params: params,
+        ttl: req.ttl,
+        url: req.url,
     };
 }
 
@@ -338,10 +350,10 @@ function queryString(obj: {[key: string]: number | string | boolean} | null | un
 }
 
 const reqMethods: ReqMethods = {
-    get: (url, params, other) => createRequest('get', url + queryString(params), null, other),
-    put: (url, params, other) => createRequest('put', url, params, other),
-    post: (url, params, other) => createRequest('post', url, params, other),
-    delete: (url, params, other) => createRequest('delete', url, params, other),
+    get: (url, params, other) => createRawRequest('get', url + queryString(params), null, other),
+    put: (url, params, other) => createRawRequest('put', url, params, other),
+    post: (url, params, other) => createRawRequest('post', url, params, other),
+    delete: (url, params, other) => createRawRequest('delete', url, params, other),
 };
 
 const createResMethods = <BoxedResponse extends Box, Res>(
@@ -364,7 +376,6 @@ const createResMethods = <BoxedResponse extends Box, Res>(
 };
 
 function query(
-    name: string,
     req: RequestData,
     {fetch, queryCache, defaultTTL}: Context,
     matchers: Matcher<string, string, unknown, unknown>[],
@@ -401,7 +412,6 @@ function query(
                 res => {
                     if (ttl > 0) {
                         const item: QueryCacheItem = {
-                            name: name,
                             response: res.kind === 'data' ? res.value : null,
                             error: res.kind === 'error' ? res.value : null,
                             request: req,
