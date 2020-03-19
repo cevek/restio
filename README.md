@@ -1,4 +1,7 @@
+
 # React-APIO
+
+[![MinGzip](https://badgen.net/bundlephobia/minzip/react-apio)](https://bundlephobia.com/result?p=react-apio@1.0.3)
 
 APIO is absolutely typed rest api client for React.
 
@@ -11,6 +14,8 @@ It uses react hooks and suspense, so you don't need redux or mobx to save http r
 🔥 100% Typed absolutely all aspects
 
 🚀 React Suspense and hooks
+
+⚡️️ 2kb gzipped
 
 🎹 Multiple response types from one api method 200/401/404...
 
