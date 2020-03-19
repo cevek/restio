@@ -4,7 +4,7 @@ type ResponseDataValue = unknown; //{__brand: 'ReqResponse'};
 type QueryCacheItem<Req extends RequestData<unknown> = RequestData, Name = string> = {
     name: Name;
     response: Box | null;
-    error: RestApiError | Error | null;
+    error: ApiError | Error | null;
     request: Req;
     requestedAt: string;
     loadingDur: number;
@@ -112,7 +112,11 @@ export type RequestData<Meta = unknown> = {
 };
 
 type ReqMethods = {
-    get: <Meta>(url: string, other?: Other<Meta>) => RequestData<Meta>;
+    get: <Meta>(
+        url: string,
+        queryParams?: {[key: string]: number | string | boolean} | null,
+        other?: Other<Meta>,
+    ) => RequestData<Meta>;
     post: <Meta>(url: string, params: object | null, other?: Other<Meta>) => RequestData<Meta>;
     put: <Meta>(url: string, params: object | null, other?: Other<Meta>) => RequestData<Meta>;
     delete: <Meta>(url: string, params: object | null, other?: Other<Meta>) => RequestData<Meta>;
@@ -143,13 +147,13 @@ export function createApiFactory() {
                                     fetcher(req).then(
                                         (data): FetcherResult => {
                                             if (data.status === 'ConnectionFailed') {
-                                                throw new RestApiError<ErroredBox>(
+                                                throw new ApiError<ErroredBox>(
                                                     {request: req, responseValue: cast(null), status: 0},
                                                     box('ConnectionFailed', data.data),
                                                 );
                                             }
                                             if (data.status === 'JsonParseError') {
-                                                throw new RestApiError<ErroredBox>(
+                                                throw new ApiError<ErroredBox>(
                                                     {request: req, responseValue: cast(null), status: 0},
                                                     box('UnacceptableResponse', data.data),
                                                 );
@@ -182,8 +186,8 @@ export function createApiFactory() {
                             };
                             factory.isResponseError = (
                                 value: unknown,
-                            ): value is RestApiError<BoxedResponse | ErroredBox> => {
-                                return value instanceof RestApiError;
+                            ): value is ApiError<BoxedResponse | ErroredBox> => {
+                                return value instanceof ApiError;
                             };
                             return factory;
 
@@ -253,7 +257,7 @@ export function createApiFactory() {
                                                 }
                                                 return result;
                                             }
-                                            throw new RestApiError(originalResponse, box);
+                                            throw new ApiError(originalResponse, box);
                                         });
                                     };
                                 }
@@ -323,12 +327,22 @@ function createRequest<Meta>(
     };
 }
 
+function queryString(obj: {[key: string]: number | string | boolean} | null | undefined) {
+    if (typeof obj === 'object' && obj !== null) {
+        const arr: string[] = [];
+        for (const key in obj) {
+            arr.push(`key=${obj[key]}`);
+        }
+        return arr.length > 0 ? '?' + arr.join('&') : '';
+    }
+    return '';
+}
+
 const reqMethods: ReqMethods = {
-    get: <Meta>(url: string, other?: Other<Meta>) => createRequest('get', url, null, other),
-    put: <Meta>(url: string, params: object | null, other?: Other<Meta>) => createRequest('put', url, params, other),
-    post: <Meta>(url: string, params: object | null, other?: Other<Meta>) => createRequest('post', url, params, other),
-    delete: <Meta>(url: string, params: object | null, other?: Other<Meta>) =>
-        createRequest('delete', url, params, other),
+    get: (url, params, other) => createRequest('get', url + queryString(params), null, other),
+    put: (url, params, other) => createRequest('put', url, params, other),
+    post: (url, params, other) => createRequest('post', url, params, other),
+    delete: (url, params, other) => createRequest('delete', url, params, other),
 };
 
 const createResMethods = <BoxedResponse extends Box, Res>(
@@ -378,7 +392,7 @@ function query(
                 ({box, originalResponse}) => {
                     const handler = matchers.find(m => m.on === box.type);
                     if (handler === undefined) {
-                        return kind('error', new RestApiError(originalResponse, box));
+                        return kind('error', new ApiError(originalResponse, box));
                     }
                     return kind('data', handler.handler(box.value));
                 },
@@ -519,7 +533,7 @@ export function fakeFetchFactory(config: {
 }
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-export class RestApiError<T extends Box = Box> {
+export class ApiError<T extends Box = Box> {
     constructor(public response: ResponseData | null, public box: T, public kind = box.type) {}
 }
 
