@@ -1,6 +1,5 @@
 import * as React from 'react';
 type QueryCache = Map<string, QueryCacheItem>;
-type ResponseDataValue = unknown; //{__brand: 'ReqResponse'};
 type QueryCacheItem<Req extends RequestData<unknown> = RequestData, Name = string> = {
     name: Name;
     response: Box | null;
@@ -11,8 +10,8 @@ type QueryCacheItem<Req extends RequestData<unknown> = RequestData, Name = strin
     lastAccess: number;
 };
 
-type FetchResponse =
-    | {status: number; data: ResponseDataValue}
+export type FetchResponse =
+    | {status: number; data: unknown}
     | {status: 'ConnectionFailed'; data: Error}
     | {status: 'JsonParseError'; data: Error};
 
@@ -42,7 +41,7 @@ type ReqMapMut = {
     };
 };
 
-export type ResponseData<T = ResponseDataValue> = {
+export type ResponseData<T = unknown> = {
     status: number;
     responseValue: T;
     request: RequestData;
