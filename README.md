@@ -9,11 +9,17 @@ It uses react hooks and suspense, so you don't need redux or mobx to save http r
 ## Features
 
 🔥 100% Typed absolutely all aspects
+
 🚀 React Suspense and hooks
+
 🎹 Multiple response types from one api method 200/401/404...
+
 🦄 Node & Browser Support
+
 🔭 All api layer things in one place
+
 💎 Use any implemetation of fetch - es6 fetch/axios/fake fetch/node request...
+
 🏝 Calm api refactoring
 
 ## Documentation
@@ -39,7 +45,7 @@ function App() {
 
 ```
 
-First you need to create api factory, which can shared between any react apps (react native/web/ssr)
+First you need to create api factory, which can be shared between any react apps (react native/web/ssr)
 
 Next you should group income responses by buckets
 
