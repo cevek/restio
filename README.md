@@ -1,16 +1,141 @@
-# restio
+# React-APIO
 
-RestIO is absolutely typed rest api client for React. 
+APIO is absolutely typed rest api client for React.
 
-No more worry about api typing and refactoring. 
+No more worry about api typings and refactoring.
 
-It uses react hooks and suspense, so you don't need redux or mobx to save http request responses anymore. 
+It uses react hooks and suspense, so you don't need redux or mobx to save http request responses anymore.
 
-## Usage
+## Features
+
+🔥 100% Typed absolutely all aspects
+🚀 React Suspense and hooks
+🎹 Multiple response types from one api method 200/401/404...
+🦄 Node & Browser Support
+🔭 All api layer things in one place
+💎 Use any implemetation of fetch - es6 fetch/axios/fake fetch/node request...
+🏝 Calm api refactoring
+
+## Documentation
+
+Soon
+
+## How it works
+
+```tsx
+const ApiFactory = createApiFactory()
+    .group(...)
+    .query(...)
+    .mutation(...)
+
+const {ApiProvider, useSuspense, useMutation, useApi} = createReactApiTools(ApiFactory);
+
+function App() {
+    const api = ApiFactory()
+    <ApiProvider api={api}>
+       Foo
+    </ApiProvider>
+}
+
+```
+
+First you need to create api factory, which can shared between any react apps (react native/web/ssr)
+
+Next you should group income responses by buckets
+
 ```ts
+// here we group all responses into 5 buckets: Success/AuthRequired/NotFound/ClientError/ServerError
+.group(res => {
+    if (res.status >= 200 && res.status < 300) return box('Success', res.responseValue);
+    if (res.status === 401) return box('AuthRequired', res.responseValue as AuthRequired);
+    if (res.status === 404) return box('NotFound', res.responseValue as NotFound);
+    if (res.status >= 400 && res.status < 500) return box('ClientError', res.responseValue);
+    return box('ServerError', null);
+})
+```
+
+Then you should specify all your query api methods - `GET` requests, which can be cached
+
+```ts
+.query((r/*utilities*/) => ({
+    // name to use in your components
+    getTodos: {
+        request: (params: {limit: number}) => r.get(/*url*/'todos', params /*get query params*/),
+        // here we proxy only Success type from our groupped response with Todo[] type
+        response: r.onSuccess<Todo[]>(),
+        // or if you want to check response type
+        response: r.onSuccess(val => {
+            if (!Array.isArray(val)) throw new TypeError('Incorrect response type');
+            return val as Todo[];
+        }),
+        // or we pass three response types to components: Success, NotFound, ClientError as MyError
+        response: r.onSuccess<Todo[]>().passthrough('NotFound').passthroughNamedTyped('ClientError', 'MyError', val => val as MyError)
+    },
+}))
+```
+
+Same we specify mutations - `PUT`, `POST`, `DELETE` requests
+```ts
+.mutation(r => ({
+    addTodo: {
+        request: (todo: {name: string}) => r.post('todo', params/*payload*/),
+        response: r.onSuccess<void>(),
+        // here we should clear getTodos cache, and all components which uses useSuspense().getTodos(...) automatically will be refreshed
+        effectOnSuccess: () => r.cache.deleteByName('getTodos'),
+    },
+}))
+```
+
+Then after api factory is done you create react utils which will used in react components
+```tsx
+
+const {ApiProvider, useSuspense, useMutation, useApi} = createReactApiTools(ApiFactory);
+
+function App() {
+    const api = ApiFactory()
+    <ErrorBoundary>
+        <React.Suspense fallback="Loading...">
+            <ApiProvider api={api}>
+                <Todos/>
+            </ApiProvider>
+        </React.Suspense>
+    </ErrorBoundary>
+}
+
+function Todos() {
+    // Return type is Box<'Success', Todo[]> which shorter type of {type: 'Success', value: Todo[]} 
+    // or Box<'Success', Todo[]> | Box<'NotFound', NotFound> | Box<'MyError', MyError> if you have used passthough
+    const todos = useSuspense().getTodos({limit: 10})
+    // if error will happen like ServerError or ConnectionFailed it will be thrown as ApiError and should be handled by ErrorBoundary
+    return (
+        <div>
+            {todos.kind === 'Success' && todos.value.map(todo => <div>{todo.name}</div>)}
+            {todos.kind === 'MyError' && <div>Some Error</div>}
+        </div>
+    )
+}
+
+function AddTodo(props: {id: number}) {
+    const [name, setName] = React.createState('');
+    // after create new todo Todos component will be refreshed
+    // status type is Empty | Loading | Result from addTodo implementation: Box<'Empty', void> | Box<'Loading', void> | Box<'Success', void>
+    const [status, createTodo] = useMutation(api => api.addTodo({name: name}))
+    return (
+        <div>
+            <input value={name} onChange={setName} />
+            <button disabled={status.type === 'Loading'} onClick={createTodo}>Create</button>  
+        </div>
+    )
+}
+
+```
+
+## Complex Example
+
+```tsx
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-import {createReactRestApi, createRestApiFactory, fakeFetchFactory, group, ResponseData, RestApiError} from 'restio';
+import {createReactApiTools, createApiFactory, fakeFetchFactory, box, ResponseData, ApiError} from 'react-apio';
 
 type Profile = {name: string};
 type AuthRequired = {err: string};
@@ -19,14 +144,14 @@ type Status = {status: string};
 
 // group responses to buckets by status code
 function groupResponse(res: ResponseData) {
-    if (res.status >= 200 && res.status < 300) return group('success', res.responseValue);
-    if (res.status === 401) return group('authRequired', res.responseValue as AuthRequired);
-    if (res.status === 404) return group('notFound', res.responseValue as NotFound);
-    if (res.status >= 400 && res.status < 500) return group('clientError', res.responseValue);
-    return group('serverError', null);
+    if (res.status >= 200 && res.status < 300) return box('Success', res.responseValue);
+    if (res.status === 401) return box('AuthRequired', res.responseValue as AuthRequired);
+    if (res.status === 404) return box('NotFound', res.responseValue as NotFound);
+    if (res.status >= 400 && res.status < 500) return box('ClientError', res.responseValue);
+    return box('ServerError', null);
 }
 
-const restApiFactory = createRestApiFactory()
+const restApiFactory = createApiFactory()
     .group(groupResponse)
     .query(r => ({
         /** Get my profile */
@@ -42,8 +167,8 @@ const restApiFactory = createRestApiFactory()
                     // you can transform/normalize value as how you want
                     return val as Profile;
                 })
-                // Proxy value with notFound type from groupResponse directly without changes
-                .proxy('notFound'),
+                // Passthrough value with notFound type from groupResponse directly without changes
+                .passthrough('NotFound'),
         },
     }))
     .mutation(r => ({
@@ -65,11 +190,11 @@ const restApiFactory = createRestApiFactory()
         },
     }));
 
-const {ApiProvider, useSuspense, useMutation, useApi} = createReactRestApi(restApiFactory);
+const {ApiProvider, useSuspense, useMutation, useApi} = createReactApiTools(restApiFactory);
 
 function App() {
     const api = restApiFactory({
-        fetch(req) {
+        fetcher(req) {
             return fakeFetch(req.method, req.url, req.json);
             /* or use es6 fetch/axios or anything you want */
             // return fetch('https://youdomain/' + req.url, {
@@ -106,22 +231,22 @@ function App() {
 }
 
 function UserProfilePage() {
-    const userProfile = useSuspense().getUserProfile({userId: '1'}); // Group<"notFound", NotFound> | Group<"success", Profile>
+    const userProfile = useSuspense().getUserProfile({userId: '1'}); // Box<"NotFound", NotFound> | Box<"Success", Profile>
     return (
         <div>
-            {userProfile.group === 'success' && <h1>Profile of {userProfile.value.name}</h1>}
-            {userProfile.group === 'notFound' && <h1>Profile not found {userProfile.value.err}</h1>}
+            {userProfile.type === 'Success' && <h1>Profile of {userProfile.value.name}</h1>}
+            {userProfile.type === 'NotFound' && <h1>Profile not found {userProfile.value.err}</h1>}
         </div>
     );
 }
 
 function MyProfilePage() {
-    const profile = useSuspense().getProfile(); // Group<"success", Profile>
+    const profile = useSuspense().getProfile(); // Box<"Success", Profile>
     const [logoutResult, logout] = useMutation(mut => mut.logout());
     return (
         <h1>
             Hello {profile.value.name}
-            <button disabled={logoutResult.group === 'Loading'} onClick={logout}>
+            <button disabled={logoutResult.type === 'Loading'} onClick={logout}>
                 Logout
             </button>
         </h1>
@@ -131,7 +256,7 @@ function MyProfilePage() {
 function LoginForm(props: {onLogin: () => void}) {
     const [loginResult, login] = useMutation(api =>
         api.login({login: 'foo', password: 'bar'}).then(data => {
-            if (data.group === 'success') {
+            if (data.type === 'Success') {
                 props.onLogin();
             }
             return data;
@@ -139,7 +264,7 @@ function LoginForm(props: {onLogin: () => void}) {
     );
     return (
         <div>
-            <button disabled={loginResult.group === 'Loading'} onClick={login}>
+            <button disabled={loginResult.type === 'Loading'} onClick={login}>
                 Login
             </button>
         </div>
@@ -163,10 +288,10 @@ function ErrorView(props: {children: React.ReactNode; tryAgain?: () => void}) {
 // If authRequired response will be thrown in a deep component then LoginForm will be shown
 const AuthZone = createBoundary(function AuthZone(props) {
     if (props.error !== null) {
-        if (restApiFactory.isResponseError(props.error) && props.error.group.group === 'authRequired') {
+        if (restApiFactory.isResponseError(props.error) && props.error.box.type === 'AuthRequired') {
             return <LoginForm onLogin={props.resetError} />;
         }
-        // rethrow error to upper ErrorBoundary
+        // rethrow error to upper ErrorBoundary if other error
         throw props.error;
     }
     return <>{props.children}</>;
@@ -183,16 +308,16 @@ const ErrorBoundary = createBoundary(
         const error = props.error;
         if (error !== null) {
             if (restApiFactory.isResponseError(error)) {
-                if (error.group.group === 'serverError') {
+                if (error.box.type === 'ServerError') {
                     return <ErrorView tryAgain={tryAgain}>Internal Server Error</ErrorView>;
                 }
-                if (error.group.group === 'failed') {
+                if (error.box.type === 'ConnectionFailed') {
                     return <ErrorView tryAgain={tryAgain}>Connection Failed</ErrorView>;
                 }
-                if (error.group.group === 'unacceptableResponse') {
+                if (error.box.type === 'UnacceptableResponse') {
                     return <ErrorView>Unacceptable Response</ErrorView>;
                 }
-                if (error.group.group === 'notFound') {
+                if (error.box.type === 'NotFound') {
                     return <ErrorView>Not Found</ErrorView>;
                 }
             }
@@ -200,8 +325,10 @@ const ErrorBoundary = createBoundary(
         }
         return <>{props.children}</>;
     },
-    (error: Error, errorInfo: React.ErrorInfo) => {
-        console.error(error, errorInfo.componentStack);
+    {
+        didCatch: (error: Error, errorInfo: React.ErrorInfo) => {
+            console.error(error, errorInfo.componentStack);
+        },
     },
 );
 
@@ -245,7 +372,7 @@ ReactDOM.render(<App />, document.getElementById('root'));
 
 // to prevent noisy uncaught errors
 window.addEventListener('error', event => {
-    if (event.error instanceof RestApiError) {
+    if (event.error instanceof ApiError) {
         event.preventDefault();
     }
 });
@@ -253,14 +380,14 @@ window.addEventListener('error', event => {
 // utility to create error boundary as functional components
 function createBoundary(
     Component: React.FunctionComponent<{error: Error | null; resetError: () => void; children: React.ReactNode}>,
-    didCatch?: (error: Error, errorInfo: React.ErrorInfo) => void,
+    config?: {didCatch?: (error: Error, errorInfo: React.ErrorInfo) => void},
 ) {
     return class Boundary extends React.Component<{}, {error: Error | null}> {
         state: {error: Error | null} = {error: null};
         static getDerivedStateFromError(error: Error) {
             return {error: error};
         }
-        componentDidCatch = didCatch;
+        componentDidCatch = config?.didCatch;
         reset = () => this.setState({error: null});
         render() {
             return <Component error={this.state.error} resetError={this.reset} children={this.props.children} />;
@@ -270,4 +397,3 @@ function createBoundary(
 
 ```
 
-Mutation and query returns promise with result. Suspense returns just result.

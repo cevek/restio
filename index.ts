@@ -1,9 +1,9 @@
 import * as React from 'react';
-export type QueryCache = Map<string, QueryCacheItem>;
-export type ResponseDataValue = unknown; //{__brand: 'ReqResponse'};
-export type QueryCacheItem<Req extends RequestData<unknown> = RequestData, Name = string> = {
+type QueryCache = Map<string, QueryCacheItem>;
+type ResponseDataValue = unknown; //{__brand: 'ReqResponse'};
+type QueryCacheItem<Req extends RequestData<unknown> = RequestData, Name = string> = {
     name: Name;
-    response: Group | null;
+    response: Box | null;
     error: RestApiError | Error | null;
     request: Req;
     requestedAt: string;
@@ -13,18 +13,18 @@ export type QueryCacheItem<Req extends RequestData<unknown> = RequestData, Name 
 
 type FetchResponse =
     | {status: number; data: ResponseDataValue}
-    | {status: 'Failed'; data: Error}
+    | {status: 'ConnectionFailed'; data: Error}
     | {status: 'JsonParseError'; data: Error};
 
 type RestApiConfig = {
     queryCache?: QueryCache;
-    fetch: (req: RequestData) => Promise<FetchResponse>;
+    fetcher: (req: RequestData) => Promise<FetchResponse>;
     defaultTTL?: number;
 };
 
 type Context = {
     queryCache: QueryCache;
-    fetch: (req: RequestData) => Promise<{originalResponse: ResponseData; group: Group}>;
+    fetch: (req: RequestData) => Promise<FetcherResult>;
     defaultTTL: number;
 };
 
@@ -48,26 +48,23 @@ export type ResponseData<T = ResponseDataValue> = {
     request: RequestData;
 };
 
-type ResMethods<T extends Group, Res> = {
-    _: Res;
+type ResMethods<T extends Box, Res> = {
+    ResultType: Res;
     matchers: Matcher<string, string, unknown, unknown>[];
-    on<K extends T['group'], R extends Group>(
-        k: K,
-        val: (val: Extract<T, Group<K>>['value']) => R,
-    ): ResMethods<T, Res | R>;
-    onSuccess<R>(): ResMethods<T, Res | Group<'success', R>>;
-    onSuccessTyped<R>(validator: (val: unknown) => R): ResMethods<T, Res | Group<'success', R>>;
-    proxy<K extends T['group']>(k: K): ResMethods<T, Res | Extract<T, Group<K>>>;
-    proxyTyped<K extends T['group'], R>(k: K, validator: (val: unknown) => R): ResMethods<T, Res | Group<K, R>>;
-    proxyAs<K extends T['group'], K2 extends string>(
+    on<K extends T['type'], R extends Box>(k: K, val: (val: Extract<T, Box<K>>['value']) => R): ResMethods<T, Res | R>;
+    onSuccess<R>(): ResMethods<T, Res | Box<'Success', R>>;
+    onSuccessTyped<R>(validator: (val: unknown) => R): ResMethods<T, Res | Box<'Success', R>>;
+    passthrough<K extends T['type']>(k: K): ResMethods<T, Res | Extract<T, Box<K>>>;
+    passthroughTyped<K extends T['type'], R>(k: K, validator: (val: unknown) => R): ResMethods<T, Res | Box<K, R>>;
+    passthroughNamed<K extends T['type'], K2 extends string>(
         from: K,
         to: K2,
-    ): ResMethods<T, Res | Group<K2, Extract<T, Group<K>>['value']>>;
-    proxyAsTyped<K extends T['group'], K2 extends string, R>(
+    ): ResMethods<T, Res | Box<K2, Extract<T, Box<K>>['value']>>;
+    passthroughNamedTyped<K extends T['type'], K2 extends string, R>(
         k: K,
         to: K2,
         validator: (val: unknown) => R,
-    ): ResMethods<T, Res | Group<K2, R>>;
+    ): ResMethods<T, Res | Box<K2, R>>;
 };
 
 export type Api<Q extends ReqMapQuery, M extends ReqMapQuery> = {
@@ -76,17 +73,17 @@ export type Api<Q extends ReqMapQuery, M extends ReqMapQuery> = {
     ) => {
         [P in keyof Q]: (
             params: Q[P]['request'] extends () => any ? void : Parameters<Q[P]['request']>[0],
-        ) => Q[P]['response']['_'];
+        ) => Q[P]['response']['ResultType'];
     };
     query: {
         [P in keyof Q]: (
             params: Q[P]['request'] extends () => any ? void : Parameters<Q[P]['request']>[0],
-        ) => Promise<Q[P]['response']['_']>;
+        ) => Promise<Q[P]['response']['ResultType']>;
     };
     mutation: {
         [P in keyof M]: (
             params: M[P]['request'] extends () => any ? void : Parameters<M[P]['request']>[0],
-        ) => Promise<M[P]['response']['_']>;
+        ) => Promise<M[P]['response']['ResultType']>;
     };
     cache: Cache<Q>;
 };
@@ -97,7 +94,7 @@ type Cache<Q extends ReqMapQuery> = {
     deleteBy(
         predicate: (
             params: {
-                [P in keyof Q]: QueryCacheItem<ReturnType<Q[P]['response']['_']>, P>;
+                [P in keyof Q]: QueryCacheItem<ReturnType<Q[P]['response']['ResultType']>, P>;
             }[keyof Q],
         ) => boolean,
     ): void;
@@ -121,50 +118,56 @@ type ReqMethods = {
     delete: <Meta>(url: string, params: object | null, other?: Other<Meta>) => RequestData<Meta>;
 };
 
+type FetcherResult = {originalResponse: ResponseData; box: Box};
 const cacheItemToListenersMap = new Map<QueryCacheItem, Set<(item: QueryCacheItem) => void>>();
 const listenerToCacheItemMap = new Map<(item: QueryCacheItem) => void, QueryCacheItem>();
-const promiseCache = new Map<string, Promise<{originalResponse: ResponseData; group: Group}>>();
+const promiseCache = new Map<string, Promise<FetcherResult>>();
 
-type QUtils<G extends Group> = ReqMethods & ResMethods<G, never> & {shape: <T>() => (val: unknown) => T};
-type MUtils<G extends Group, Q extends ReqMapQuery> = QUtils<G> & {cache: Cache<Q>};
+type QUtils<BoxedResponse extends Box> = ReqMethods &
+    ResMethods<BoxedResponse, never> & {shape: <T>() => (val: unknown) => T};
+type MUtils<BoxedResponse extends Box, Q extends ReqMapQuery> = QUtils<BoxedResponse> & {cache: Cache<Q>};
 
-export type DefaultGroups = Group<'failed', Error> | Group<'unacceptableResponse', Error>;
-export function createRestApiFactory() {
+const Success = 'Success';
+
+type ErroredBox = Box<'ConnectionFailed', Error> | Box<'UnacceptableResponse', Error>;
+export function createApiFactory() {
     return {
-        group<GroupStatus extends Group>(groupStatus: (x: ResponseData) => GroupStatus) {
+        group<BoxedResponse extends Box>(groupToBox: (x: ResponseData) => BoxedResponse) {
             return {
-                query<Q extends ReqMapQuery>(q: (r: QUtils<GroupStatus>) => Q) {
+                query<Q extends ReqMapQuery>(q: (r: QUtils<BoxedResponse>) => Q) {
                     return {
-                        mutation<M extends ReqMapMut>(m: (r: MUtils<GroupStatus, Q>) => M) {
+                        mutation<M extends ReqMapMut>(m: (r: MUtils<BoxedResponse, Q>) => M) {
                             const factory = (config: RestApiConfig): Api<Q, M> => {
-                                const {fetch: f, queryCache = new Map(), defaultTTL = 600_000} = config;
+                                const {fetcher, queryCache = new Map(), defaultTTL = 600_000} = config;
                                 const fetch: Context['fetch'] = (req: RequestData) =>
-                                    f(req).then(data => {
-                                        if (data.status === 'Failed') {
-                                            throw new RestApiError(
-                                                {request: req, responseValue: cast(null), status: 0},
-                                                group('failed', data.data),
-                                            );
-                                        }
-                                        if (data.status === 'JsonParseError') {
-                                            throw new RestApiError(
-                                                {request: req, responseValue: cast(null), status: 0},
-                                                group('unacceptableResponse', data.data),
-                                            );
-                                        }
-                                        const response: ResponseData = {
-                                            status: data.status,
-                                            request: req,
-                                            responseValue: data.data,
-                                        };
-                                        return {
-                                            originalResponse: response,
-                                            group: groupStatus(response),
-                                        };
-                                    });
+                                    fetcher(req).then(
+                                        (data): FetcherResult => {
+                                            if (data.status === 'ConnectionFailed') {
+                                                throw new RestApiError<ErroredBox>(
+                                                    {request: req, responseValue: cast(null), status: 0},
+                                                    box('ConnectionFailed', data.data),
+                                                );
+                                            }
+                                            if (data.status === 'JsonParseError') {
+                                                throw new RestApiError<ErroredBox>(
+                                                    {request: req, responseValue: cast(null), status: 0},
+                                                    box('UnacceptableResponse', data.data),
+                                                );
+                                            }
+                                            const response: ResponseData = {
+                                                status: data.status,
+                                                request: req,
+                                                responseValue: data.data,
+                                            };
+                                            return {
+                                                originalResponse: response,
+                                                box: groupToBox(response),
+                                            };
+                                        },
+                                    );
                                 const context: Context = {fetch, queryCache, defaultTTL};
                                 const cache = createCache(queryCache);
-                                const utils: MUtils<GroupStatus, Q> = {
+                                const utils: MUtils<BoxedResponse, Q> = {
                                     ...reqMethods,
                                     ...createResMethods(),
                                     shape: shape,
@@ -179,7 +182,7 @@ export function createRestApiFactory() {
                             };
                             factory.isResponseError = (
                                 value: unknown,
-                            ): value is RestApiError<GroupStatus | DefaultGroups> => {
+                            ): value is RestApiError<BoxedResponse | ErroredBox> => {
                                 return value instanceof RestApiError;
                             };
                             return factory;
@@ -241,16 +244,16 @@ export function createRestApiFactory() {
                                     const matchers = methods[key].response.matchers;
                                     mutation[k] = params => {
                                         const req = createRequest(params);
-                                        return context.fetch(req).then(({group, originalResponse}) => {
-                                            const handler = matchers.find(m => m.on === group.group);
+                                        return context.fetch(req).then(({box, originalResponse}) => {
+                                            const handler = matchers.find(m => m.on === box.type);
                                             if (handler !== undefined) {
-                                                const result = handler.handler(group.value);
-                                                if (group.group === 'success' && effect !== undefined) {
+                                                const result = handler.handler(box.value);
+                                                if (box.type === Success && effect !== undefined) {
                                                     effect();
                                                 }
                                                 return result;
                                             }
-                                            throw new RestApiError(originalResponse, group);
+                                            throw new RestApiError(originalResponse, box);
                                         });
                                     };
                                 }
@@ -305,7 +308,7 @@ export function deserializeCache(obj: unknown) {
 }
 
 type Other<Meta> = {meta?: Meta; ttl?: number};
-export function createRequest<Meta>(
+function createRequest<Meta>(
     method: 'get' | 'put' | 'delete' | 'post',
     url: string,
     params: object | null,
@@ -328,21 +331,22 @@ const reqMethods: ReqMethods = {
         createRequest('delete', url, params, other),
 };
 
-const createResMethods = <G extends Group, Res>(
-    items: {on: string; handler: (val: unknown) => Group}[] = [],
-): ResMethods<G, Res> => {
+const createResMethods = <BoxedResponse extends Box, Res>(
+    items: {on: string; handler: (val: unknown) => Box}[] = [],
+): ResMethods<BoxedResponse, Res> => {
     return {
-        _: cast(null),
+        ResultType: cast(null),
         matchers: items,
         on: (k, handler) => createResMethods([...items, {on: k, handler: handler}]),
-        onSuccess: () => createResMethods([...items, {on: 'success', handler: val => group('success', val)}]),
+        onSuccess: () => createResMethods([...items, {on: Success, handler: val => box(Success, val)}]),
         onSuccessTyped: validator =>
-            createResMethods([...items, {on: 'success', handler: val => group('success', validator(val))}]),
-        proxy: k => createResMethods([...items, {on: k, handler: val => group(k, val)}]),
-        proxyTyped: (k, validator) => createResMethods([...items, {on: k, handler: val => group(k, validator(val))}]),
-        proxyAs: (k1, k2) => createResMethods([...items, {on: k1, handler: val => group(k2, val)}]),
-        proxyAsTyped: (k1, k2, validator) =>
-            createResMethods([...items, {on: k1, handler: val => group(k2, validator(val))}]),
+            createResMethods([...items, {on: Success, handler: val => box(Success, validator(val))}]),
+        passthrough: k => createResMethods([...items, {on: k, handler: val => box(k, val)}]),
+        passthroughTyped: (k, validator) =>
+            createResMethods([...items, {on: k, handler: val => box(k, validator(val))}]),
+        passthroughNamed: (k1, k2) => createResMethods([...items, {on: k1, handler: val => box(k2, val)}]),
+        passthroughNamedTyped: (k1, k2, validator) =>
+            createResMethods([...items, {on: k1, handler: val => box(k2, validator(val))}]),
     };
 };
 
@@ -371,12 +375,12 @@ function query(
         promiseCache.set(req.url, promise);
         const res = promise
             .then(
-                ({group, originalResponse}) => {
-                    const handler = matchers.find(m => m.on === group.group);
+                ({box, originalResponse}) => {
+                    const handler = matchers.find(m => m.on === box.type);
                     if (handler === undefined) {
-                        return kind('error', new RestApiError(originalResponse, group));
+                        return kind('error', new RestApiError(originalResponse, box));
                     }
-                    return kind('data', handler.handler(group.value));
+                    return kind('data', handler.handler(box.value));
                 },
                 (err: Error) => kind('error', err),
             )
@@ -411,7 +415,7 @@ function kind<Kind extends string, T>(kind: Kind, value: T) {
     return {kind: kind, value: value};
 }
 
-export function createReactRestApi<Config, Q extends ReqMapQuery, M extends ReqMapQuery>(
+export function createReactApiTools<Config, Q extends ReqMapQuery, M extends ReqMapQuery>(
     _apiFactory: (config: Config, cache: QueryCache) => Api<Q, M>,
 ) {
     const context = React.createContext(cast<Api<Q, M>>(null));
@@ -439,14 +443,14 @@ export function createReactRestApi<Config, Q extends ReqMapQuery, M extends ReqM
             const api = React.useContext(context);
             return api.suspense(cb);
         },
-        useMutation: <R extends Group<N, unknown>, N extends string>(
+        useMutation: <R extends Box<N, unknown>, N extends string>(
             fn: (mut: Api<Q, M>['mutation']) => Promise<R>,
-        ): [R | Group<'Empty', void> | Group<'Loading', void>, () => void] => {
+        ): [R | Box<'Empty', void> | Box<'Loading', void>, () => void] => {
             const [state, setState] = React.useState<
-                Group<'Empty', void> | Group<'Loading', void> | Group<'Error', Error> | R
-            >(group('Empty', undefined));
+                Box<'Empty', void> | Box<'Loading', void> | Box<'Error', Error> | R
+            >(box('Empty', undefined));
             const api = React.useContext(context);
-            if (state.group === 'Error') {
+            if (state.type === 'Error') {
                 throw state.value;
             }
             let mounted = true;
@@ -460,10 +464,10 @@ export function createReactRestApi<Config, Q extends ReqMapQuery, M extends ReqM
                 cast(state),
                 () => {
                     const promise = fn(api.mutation);
-                    setState(group('Loading', undefined));
+                    setState(box('Loading', undefined));
                     promise.then(
                         res => (mounted ? setState(res) : null),
-                        (err: Error) => (mounted ? setState(group('Error', err)) : null),
+                        (err: Error) => (mounted ? setState(box('Error', err)) : null),
                     );
                 },
             ];
@@ -471,27 +475,27 @@ export function createReactRestApi<Config, Q extends ReqMapQuery, M extends ReqM
     };
 }
 
-export type Matcher<FromK extends string, ToK extends string, FromT, ToT> = {
+type Matcher<FromK extends string, ToK extends string, FromT, ToT> = {
     on: FromK;
-    handler: (res: FromT) => Group<ToK, ToT>;
+    handler: (res: FromT) => Box<ToK, ToT>;
 };
 
-export type Group<K extends string = string, V = unknown> = {group: K; value: V};
-export function group<K extends string, V>(group: K, value: V): Group<K, V> {
-    return {group: group, value: value};
+export type Box<K extends string = string, V = unknown> = {type: K; value: V};
+export function box<K extends string, V>(type: K, value: V): Box<K, V> {
+    return {type: type, value: value};
 }
 
-export function isGroup<G extends Group>(group: unknown): group is G {
+export function isBox<B extends Box>(box: unknown): box is B {
     return (
-        typeof group === 'object' &&
-        group !== null &&
-        group.constructor === Object &&
-        typeof (group as Group).group === 'string' &&
-        'value' in group
+        typeof box === 'object' &&
+        box !== null &&
+        box.constructor === Object &&
+        typeof (box as Box).type === 'string' &&
+        ('value' as keyof Box) in box
     );
 }
 
-export function shape<T>() {
+function shape<T>() {
     return (val: unknown) => val as T;
 }
 
@@ -515,8 +519,8 @@ export function fakeFetchFactory(config: {
 }
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-export class RestApiError<T extends Group = Group> {
-    constructor(public response: ResponseData | null, public group: T, public kind = group.group) {}
+export class RestApiError<T extends Box = Box> {
+    constructor(public response: ResponseData | null, public box: T, public kind = box.type) {}
 }
 
 function cast<T>(val: unknown) {
