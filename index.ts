@@ -1,7 +1,7 @@
 import * as React from 'react';
 type QueryCache = Map<string, QueryCacheItem>;
-type QueryCacheItem<Req extends RequestData = RequestData> = {
-    response: Box | null;
+type QueryCacheItem<R extends Box = Box, Req extends RequestData = RequestData> = {
+    response: ResponseData<R> | null;
     error: ApiError | Error | null;
     request: Req;
     requestedAt: string;
@@ -9,41 +9,30 @@ type QueryCacheItem<Req extends RequestData = RequestData> = {
     lastAccess: number;
 };
 
+export type FetchResponseOk = {status: number; data: unknown};
+export type Fetcher = (req: RawRequest) => Promise<FetchResponse>;
 export type FetchResponse =
-    | {status: number; data: unknown}
+    | FetchResponseOk
     | {status: 'ConnectionFailed'; data: Error}
     | {status: 'JsonParseError'; data: Error};
 
 type RestApiConfig = {
     queryCache?: QueryCache;
-    fetcher: (req: RequestData) => Promise<FetchResponse>;
+    fetcher: (req: RawRequest) => Promise<FetchResponse>;
     defaultTTL?: number;
 };
 
-type Context = {
-    queryCache: QueryCache;
-    fetch: (req: RequestData) => Promise<FetcherResult>;
-    defaultTTL: number;
-};
-
 type ReqMapQuery = {
-    [key: string]: {
-        request: (params?: any) => RawRequest;
-        response: ResMethods<any, any>;
-    };
+    [key: string]: (params: any) => Box;
 };
 type ReqMapMut = {
-    [key: string]: {
-        request: (params?: any) => RawRequest;
-        response: ResMethods<any, any>;
-        effectOnSuccess?: () => void;
-    };
+    [key: string]: (params: any) => Promise<Box>;
 };
 
-export type ResponseData<T = unknown> = {
+export type ResponseData<T extends Box = Box> = {
     status: number;
     responseValue: T;
-    request: RequestData;
+    request: RawRequest;
 };
 
 type ResMethods<T extends Box, Res> = {
@@ -65,24 +54,14 @@ type ResMethods<T extends Box, Res> = {
     ): ResMethods<T, Res | Box<K2, R>>;
 };
 
-export type Api<Q extends ReqMapQuery, M extends ReqMapQuery> = {
-    suspense: (
+let globalMeta!: {name: string; params: unknown; callback: (item: QueryCacheItem) => void};
+export type Api<Q extends ReqMapQuery, M extends ReqMapMut> = {
+    query: (
         onCacheDelete: (item: QueryCacheItem) => void,
     ) => {
-        [P in keyof Q]: (
-            params: Q[P]['request'] extends () => any ? void : Parameters<Q[P]['request']>[0],
-        ) => Q[P]['response']['ResultType'];
+        [P in keyof Q]: (params: Q[P] extends () => any ? void : Parameters<Q[P]>[0]) => ReturnType<Q[P]>;
     };
-    query: {
-        [P in keyof Q]: (
-            params: Q[P]['request'] extends () => any ? void : Parameters<Q[P]['request']>[0],
-        ) => Promise<Q[P]['response']['ResultType']>;
-    };
-    mutation: {
-        [P in keyof M]: (
-            params: M[P]['request'] extends () => any ? void : Parameters<M[P]['request']>[0],
-        ) => Promise<M[P]['response']['ResultType']>;
-    };
+    mutation: M;
     cache: Cache<Q>;
 };
 
@@ -91,7 +70,7 @@ type Cache<Q extends ReqMapQuery> = {
     values(): QueryCacheItem[];
     deleteByName<N extends Extract<keyof Q, string>>(
         name: N,
-        predicate?: (request: RequestData<N, Parameters<Q[N]['request']>[0]>) => boolean,
+        predicate?: (request: RequestData<N, Parameters<Q[N]>[0]>) => boolean,
     ): void;
     serialize(): object;
 };
@@ -99,90 +78,84 @@ type Cache<Q extends ReqMapQuery> = {
 type Method = 'get' | 'put' | 'delete' | 'post';
 export type RequestData<Name extends string = string, Params = unknown> = {
     name: Name;
-    method: Method;
-    url: string;
-    body: unknown;
     params: Params;
-    ttl: number | null;
+    request: RawRequest;
 };
-type RawRequest = {
+export type RawRequest = {
     method: Method;
     url: string;
     body: unknown;
     ttl: number | null;
 };
 
-type ReqMethods = {
-    get: (
-        url: string,
-        queryParams?: {[key: string]: number | string | boolean} | null,
-        other?: OtherParams,
-    ) => RawRequest;
-    post: (url: string, params: object | null, other?: OtherParams) => RawRequest;
-    put: (url: string, params: object | null, other?: OtherParams) => RawRequest;
-    delete: (url: string, params: object | null, other?: OtherParams) => RawRequest;
+type ReqMethods<R> = {
+    get: (url: string, queryParams?: {[key: string]: number | string | boolean} | null) => R;
+    post: (url: string, params?: object) => R;
+    put: (url: string, params?: object) => R;
+    delete: (url: string, params?: object) => R;
 };
 
-type FetcherResult = {originalResponse: ResponseData; box: Box};
 const cacheItemToListenersMap = new Map<QueryCacheItem, Set<(item: QueryCacheItem) => void>>();
 const listenerToCacheItemMap = new Map<(item: QueryCacheItem) => void, QueryCacheItem>();
-const promiseCache = new Map<string, Promise<FetcherResult>>();
+const promiseCache = new Map<string, Promise<ResponseData<Box>>>();
 
-type QUtils<BoxedResponse extends Box> = ReqMethods &
-    ResMethods<BoxedResponse, never> & {shape: <T>() => (val: unknown) => T};
-type MUtils<BoxedResponse extends Box, Q extends ReqMapQuery> = QUtils<BoxedResponse> & {cache: Cache<Q>};
+type QUtils<BoxedResponse extends Box> = ReqMethods<ResponseData<BoxedResponse>>;
+type MUtils<BoxedResponse extends Box, Q extends ReqMapQuery> = ReqMethods<Promise<ResponseData<BoxedResponse>>> & {
+    cache: Cache<Q>;
+};
 
 const Success = 'Success';
 
 type ErroredBox = Box<'ConnectionFailed', Error> | Box<'UnacceptableResponse', Error>;
 export function createApiFactory() {
     return {
-        group<BoxedResponse extends Box>(groupToBox: (x: ResponseData) => BoxedResponse) {
+        group<BoxedResponse extends Box>(groupToBox: (x: FetchResponseOk) => BoxedResponse) {
             return {
                 query<Q extends ReqMapQuery>(q: (r: QUtils<BoxedResponse>) => Q) {
                     return {
                         mutation<M extends ReqMapMut>(m: (r: MUtils<BoxedResponse, Q>) => M) {
                             const factory = (config: RestApiConfig): Api<Q, M> => {
                                 const {fetcher, queryCache = new Map(), defaultTTL = 600_000} = config;
-                                const fetch: Context['fetch'] = (req: RequestData) =>
-                                    fetcher(req).then(
-                                        (data): FetcherResult => {
+                                const fetch: (req: RawRequest) => Promise<ResponseData<BoxedResponse>> = req =>
+                                    fetcher(req)
+                                        .catch<FetchResponse>(err => {
+                                            if (err instanceof SyntaxError && err.message.match(/JSON/)) {
+                                                return {data: err, status: 'JsonParseError'};
+                                            }
+                                            return {data: err, status: 'ConnectionFailed'};
+                                        })
+                                        .then(data => {
                                             if (data.status === 'ConnectionFailed') {
-                                                throw new ApiError<ErroredBox>(
-                                                    {request: req, responseValue: cast(null), status: 0},
-                                                    box('ConnectionFailed', data.data),
-                                                );
+                                                throw new ApiError<ErroredBox>({
+                                                    request: req,
+                                                    responseValue: box('ConnectionFailed', data.data),
+                                                    status: 0,
+                                                });
                                             }
                                             if (data.status === 'JsonParseError') {
-                                                throw new ApiError<ErroredBox>(
-                                                    {request: req, responseValue: cast(null), status: 0},
-                                                    box('UnacceptableResponse', data.data),
-                                                );
+                                                throw new ApiError<ErroredBox>({
+                                                    request: req,
+                                                    responseValue: box('UnacceptableResponse', data.data),
+                                                    status: 0,
+                                                });
                                             }
-                                            const response: ResponseData = {
+                                            return {
                                                 status: data.status,
                                                 request: req,
-                                                responseValue: data.data,
+                                                responseValue: groupToBox(data),
                                             };
-                                            return {
-                                                originalResponse: response,
-                                                box: groupToBox(response),
-                                            };
-                                        },
-                                    );
-                                const context: Context = {fetch, queryCache, defaultTTL};
+                                        });
+
                                 const cache = createCache(queryCache);
-                                const utils: MUtils<BoxedResponse, Q> = {
-                                    ...reqMethods,
-                                    ...createResMethods(),
-                                    shape: shape,
-                                    cache: cache,
-                                };
                                 return {
                                     cache: cache,
-                                    mutation: createMutations(m(utils), context),
-                                    query: createQueries(q(utils), context),
-                                    suspense: createSuspenses(q(utils), context),
+                                    mutation: m({
+                                        ...reqMethods(fetch),
+                                        cache: cache,
+                                    }),
+                                    query: createSuspenses(
+                                        q(reqMethods(req => query(req, fetch, queryCache, defaultTTL))),
+                                    ),
                                 };
                             };
                             factory.isResponseError = (
@@ -192,77 +165,19 @@ export function createApiFactory() {
                             };
                             return factory;
 
-                            function createQueries(methods: ReqMapQuery, context: Context) {
-                                const queries = {} as Api<Q, M>['query'];
-                                for (const key in methods) {
-                                    const k = key as keyof Q;
-                                    const getRawRequest = methods[key].request;
-                                    const matchers = methods[key].response.matchers;
-                                    queries[k] = params => {
-                                        const req = createRequest(getRawRequest(params), key, params);
-                                        const res = query(req, context, matchers);
-                                        if (res.kind === 'error') {
-                                            return Promise.reject(res.value);
-                                        }
-                                        if (res.kind === 'promise') {
-                                            return res.value;
-                                        }
-                                        return Promise.resolve(res.value);
-                                    };
-                                }
-                                return queries;
-                            }
-
-                            function createSuspenses(methods: ReqMapQuery, context: Context) {
+                            function createSuspenses(methods: ReqMapQuery) {
                                 return (cacheDeleteListener: (item: QueryCacheItem) => void) => {
-                                    const suspense = {} as ReturnType<Api<Q, M>['suspense']>;
+                                    const suspense = {} as ReturnType<Api<Q, M>['query']>;
                                     for (const key in methods) {
                                         const k = key as keyof Q;
-                                        const getRawRequest = methods[key].request;
-                                        const matchers = methods[key].response.matchers;
-                                        suspense[k] = params => {
-                                            const req = createRequest(getRawRequest(params), key, params);
-                                            const res = query(req, context, matchers);
-                                            if (res.kind === 'error' || res.kind === 'promise') {
-                                                throw res.value;
-                                            }
-                                            let callbackSet = cacheItemToListenersMap.get(res.value);
-                                            if (callbackSet === undefined) {
-                                                callbackSet = new Set();
-                                                cacheItemToListenersMap.set(res.value, callbackSet);
-                                            }
-                                            listenerToCacheItemMap.set(cacheDeleteListener, res.value);
-                                            callbackSet.add(cacheDeleteListener);
-                                            return res.value.response;
-                                        };
+                                        const doRequest = methods[key];
+                                        suspense[k] = cast((params: any) => {
+                                            globalMeta = {name: key, params: params, callback: cacheDeleteListener};
+                                            return doRequest(params);
+                                        });
                                     }
                                     return suspense;
                                 };
-                            }
-
-                            function createMutations(methods: ReqMapMut, context: Context) {
-                                const mutation = {} as Api<Q, M>['mutation'];
-                                for (const key in methods) {
-                                    const k = key as keyof M;
-                                    const getRawRequest = methods[key].request;
-                                    const effect = methods[key].effectOnSuccess;
-                                    const matchers = methods[key].response.matchers;
-                                    mutation[k] = params => {
-                                        const req = createRequest(getRawRequest(params), key, params);
-                                        return context.fetch(req).then(({box, originalResponse}) => {
-                                            const handler = matchers.find(m => m.on === box.type);
-                                            if (handler !== undefined) {
-                                                const result = handler.handler(box.value);
-                                                if (box.type === Success && effect !== undefined) {
-                                                    effect();
-                                                }
-                                                return result;
-                                            }
-                                            throw new ApiError(originalResponse, box);
-                                        });
-                                    };
-                                }
-                                return mutation;
                             }
 
                             function callCacheDeleteListener(item: QueryCacheItem) {
@@ -308,33 +223,17 @@ export function deserializeCache(obj: unknown) {
     return new Map<string, QueryCacheItem>(cast(obj));
 }
 
-type OtherParams = {ttl?: number};
 function createRawRequest(
     method: 'get' | 'put' | 'delete' | 'post',
     url: string,
     params: object | null | undefined,
-    other?: OtherParams,
+    ttl?: number,
 ): RawRequest {
     return {
         method: method,
         url: url,
         body: params,
-        ttl: other !== undefined && other.ttl !== undefined ? other.ttl : null,
-    };
-}
-
-function createRequest<Name extends string, Params>(
-    req: RawRequest,
-    name: Name,
-    params: Params,
-): RequestData<Name, Params> {
-    return {
-        body: req.body,
-        method: req.method,
-        name: name,
-        params: params,
-        ttl: req.ttl,
-        url: req.url,
+        ttl: ttl === undefined ? null : ttl,
     };
 }
 
@@ -349,12 +248,12 @@ function queryString(obj: {[key: string]: number | string | boolean} | null | un
     return '';
 }
 
-const reqMethods: ReqMethods = {
-    get: (url, params, other) => createRawRequest('get', url + queryString(params), null, other),
-    put: (url, params, other) => createRawRequest('put', url, params, other),
-    post: (url, params, other) => createRawRequest('post', url, params, other),
-    delete: (url, params, other) => createRawRequest('delete', url, params, other),
-};
+const reqMethods = <R>(fetcher: (req: RawRequest) => R): ReqMethods<R> => ({
+    get: (url, params) => fetcher(createRawRequest('get', url + queryString(params), null)),
+    put: (url, params) => fetcher(createRawRequest('put', url, params)),
+    post: (url, params) => fetcher(createRawRequest('post', url, params)),
+    delete: (url, params) => fetcher(createRawRequest('delete', url, params)),
+});
 
 const createResMethods = <BoxedResponse extends Box, Res>(
     items: {on: string; handler: (val: unknown) => Box}[] = [],
@@ -375,37 +274,33 @@ const createResMethods = <BoxedResponse extends Box, Res>(
     };
 };
 
-function query(
-    req: RequestData,
-    {fetch, queryCache, defaultTTL}: Context,
-    matchers: Matcher<string, string, unknown, unknown>[],
-) {
-    const ttl = req.ttl === null ? defaultTTL : req.ttl;
-    const promise = promiseCache.get(req.url);
+function query<R extends Box>(
+    req: RawRequest,
+    fetch: (req: RawRequest) => Promise<ResponseData<R>>,
+    queryCache: QueryCache,
+    defaultTTL: number,
+): ResponseData<R> {
+    const {url} = req;
+    const ttl = req.ttl ?? defaultTTL;
+    const promise = promiseCache.get(url);
     if (promise !== undefined) {
-        return kind('promise', promise);
+        throw promise;
     }
 
-    let item = queryCache.get(req.url);
+    let item = queryCache.get(url) as QueryCacheItem<R> | undefined;
     if (item !== undefined) {
         if (new Date(item.requestedAt).getTime() < Date.now() - ttl) {
-            queryCache.delete(req.url);
+            queryCache.delete(url);
             item = undefined;
         }
     }
     if (item === undefined) {
         const requestedAt = new Date();
         const promise = fetch(req);
-        promiseCache.set(req.url, promise);
+        promiseCache.set(url, promise);
         const res = promise
             .then(
-                ({box, originalResponse}) => {
-                    const handler = matchers.find(m => m.on === box.type);
-                    if (handler === undefined) {
-                        return kind('error', new ApiError(originalResponse, box));
-                    }
-                    return kind('data', handler.handler(box.value));
-                },
+                box => kind('data', box),
                 (err: Error) => kind('error', err),
             )
             .then(
@@ -414,31 +309,41 @@ function query(
                         const item: QueryCacheItem = {
                             response: res.kind === 'data' ? res.value : null,
                             error: res.kind === 'error' ? res.value : null,
-                            request: req,
+                            request: {request: req, name: globalMeta.name, params: globalMeta.params},
                             lastAccess: Date.now() - requestedAt.getTime(),
                             loadingDur: Date.now() - requestedAt.getTime(),
                             requestedAt: requestedAt.toISOString(),
                         };
-                        queryCache.set(req.url, item);
+                        let callbackSet = cacheItemToListenersMap.get(item);
+                        if (callbackSet === undefined) {
+                            callbackSet = new Set();
+                            cacheItemToListenersMap.set(item, callbackSet);
+                        }
+                        listenerToCacheItemMap.set(globalMeta.callback, item);
+                        callbackSet.add(globalMeta.callback);
+                        queryCache.set(url, item);
                     }
-                    promiseCache.delete(req.url);
+                    promiseCache.delete(url);
                 },
                 err => console.error('Unexpected error', err),
             );
-        return kind('promise', res);
+        throw res;
     }
     item.lastAccess = Date.now() - new Date(item.requestedAt).getTime();
     if (item.error !== null) {
-        return kind('error', item.error);
+        throw item.error;
     }
-    return kind('data', item);
+    if (item.response !== null) {
+        return item.response;
+    }
+    throw new Error('never');
 }
 
 function kind<Kind extends string, T>(kind: Kind, value: T) {
     return {kind: kind, value: value};
 }
 
-export function createReactApiTools<Config, Q extends ReqMapQuery, M extends ReqMapQuery>(
+export function createReactApiTools<Config, Q extends ReqMapQuery, M extends ReqMapMut>(
     _apiFactory: (config: Config, cache: QueryCache) => Api<Q, M>,
 ) {
     const context = React.createContext(cast<Api<Q, M>>(null));
@@ -464,7 +369,7 @@ export function createReactApiTools<Config, Q extends ReqMapQuery, M extends Req
                 [],
             );
             const api = React.useContext(context);
-            return api.suspense(cb);
+            return api.query(cb);
         },
         useMutation: <R extends Box<N, unknown>, N extends string>(
             fn: (mut: Api<Q, M>['mutation']) => Promise<R>,
@@ -518,32 +423,28 @@ export function isBox<B extends Box>(box: unknown): box is B {
     );
 }
 
-function shape<T>() {
-    return (val: unknown) => val as T;
-}
-
 export function fakeFetchFactory(config: {
     handler: (
-        method: Method,
-        url: string,
-        params: unknown,
+        req: RawRequest,
         res: <T>(status: FetchResponse['status'], data: T) => FetchResponse,
     ) => FetchResponse | void;
     wait?: number;
 }) {
     const {handler, wait = 500} = config;
-    return (method: Method, url: string, params: unknown) => {
-        const res = handler(method, url, params, (status, data) => cast({status: status, data: data}));
+    return (req: RawRequest) => {
+        const res = handler(req, (status, data) => cast({status: status, data: data}));
         if (res === undefined) {
-            throw new Error('FakeFetch: unhandled url: ' + url);
+            throw new Error('FakeFetch: unhandled url: ' + req.url);
         }
         return sleep(wait).then(() => res);
     };
 }
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-export class ApiError<T extends Box = Box> {
-    constructor(public response: ResponseData | null, public box: T, public kind = box.type) {}
+export class ApiError<T extends Box = Box> extends Error {
+    constructor(public response: ResponseData<T>) {
+        super('ApiError: ' + response.responseValue.type);
+    }
 }
 
 function cast<T>(val: unknown) {

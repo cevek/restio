@@ -124,7 +124,7 @@ Then after api factory is done you create react utils which will used in react c
 const {ApiProvider, useSuspense, useMutation, useApi} = createReactApiTools(ApiFactory);
 
 function App() {
-    const api = ApiFactory()
+    const api = ApiFactory({fetcher: fetcher})
     <ErrorBoundary>
         <React.Suspense fallback="Loading...">
             <ApiProvider api={api}>
@@ -167,60 +167,69 @@ function AddTodo(props: {id: number}) {
 ```tsx
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-import {createReactApiTools, createApiFactory, fakeFetchFactory, box, ResponseData, ApiError} from 'react-apio';
+import {ApiError, box, Box, createApiFactory, createReactApiTools, fakeFetchFactory, Fetcher} from 'react-apio';
 
 type Profile = {name: string};
 type AuthRequired = {err: string};
 type NotFound = {err: string};
 type Status = {status: string};
 
-// group responses to buckets by status code
-function groupResponse(res: ResponseData) {
-    if (res.status >= 200 && res.status < 300) return box('Success', res.responseValue);
-    if (res.status === 401) return box('AuthRequired', res.responseValue as AuthRequired);
-    if (res.status === 404) return box('NotFound', res.responseValue as NotFound);
-    if (res.status >= 400 && res.status < 500) return box('ClientError', res.responseValue);
-    return box('ServerError', null);
-}
-
 const restApiFactory = createApiFactory()
-    .group(groupResponse)
+    // group responses to buckets by status code
+    .group(res => {
+        if (res.status >= 200 && res.status < 300) return box('Success', res.data);
+        if (res.status === 401) return box('AuthRequired', res.data as AuthRequired);
+        if (res.status === 404) return box('NotFound', res.data as NotFound);
+        if (res.status >= 400 && res.status < 500) return box('ClientError', res.data);
+        return box('ServerError', res.data);
+    })
     .query(r => ({
         /** Get my profile */
-        getProfile: {
-            request: () => r.get('profile'),
-            response: r.onSuccess<Profile>(),
+        getProfile() {
+            const res = r.get('profile');
+            switch (res.responseValue.type) {
+                case 'Success':
+                    return res.responseValue as Box<'Success', Profile>;
+            }
+            // gives stacktrace and full request and response info
+            throw new ApiError(res);
         },
-
-        getUserProfile: {
-            request: (params: {userId: string}) => r.get(`users/${params.userId}`),
-            response: r
-                .onSuccessTyped(val => {
-                    // you can transform/normalize value as how you want
-                    return val as Profile;
-                })
-                // Passthrough value with notFound type from groupResponse directly without changes
-                .passthrough('NotFound'),
+        /** Get user profile */
+        getUserProfile(params: {userId: string}) {
+            const res = r.get(`users/${params.userId}`);
+            switch (res.responseValue.type) {
+                case 'Success':
+                    return res.responseValue as Box<'Success', Profile>;
+                case 'NotFound':
+                    return res.responseValue;
+            }
+            throw new ApiError(res);
         },
     }))
     .mutation(r => ({
         /** Login to system */
-        login: {
-            request: (params: {login: string; password: string}) => r.post('login', params),
-            response: r.onSuccess<Status>(),
-            // if you want to run some side effected after success response do it here
-            effectOnSuccess: () => {
-                // delete profile cache
-                // will reload all components which use useSuspense().getProfile()
-                r.cache.deleteByName('getProfile');
-                // you can also use predicate to specify which requests you want to delete
-                //r.cache.deleteByName('getUserProfile', p => p.params.userId === '1')
-            },
+        async login(params: {login: string; password: string}) {
+            const res = await r.post('login', params);
+            switch (res.responseValue.type) {
+                case 'Success':
+                    // delete profile cache
+                    // will reload all components which use useSuspense().getProfile()
+                    // you can also use predicate to specify which requests you want to delete
+                    // r.cache.deleteByName('getUserProfile', p => p.params.userId === '1')
+                    r.cache.deleteByName('getProfile');
+                    return res.responseValue;
+            }
+            throw new ApiError(res);
         },
-        logout: {
-            request: () => r.post('logout', null),
-            response: r.onSuccess<Status>(),
-            effectOnSuccess: () => r.cache.deleteByName('getProfile'),
+        /** Logout */
+        async logout() {
+            const res = await r.post('logout');
+            switch (res.responseValue.type) {
+                case 'Success':
+                    r.cache.deleteByName('getProfile');
+                    return res.responseValue;
+            }
+            throw new ApiError(res);
         },
     }));
 
@@ -229,24 +238,9 @@ const {ApiProvider, useSuspense, useMutation, useApi} = createReactApiTools(rest
 function App() {
     const api = restApiFactory({
         fetcher(req) {
-            return fakeFetch(req.method, req.url, req.body);
-            /* or use es6 fetch/axios or anything you want */
-            // return fetch('https://youdomain/' + req.url, {
-            //     method: req.method,
-            //     headers: {
-            //         'Content-Type': 'application/json',
-            //         'api-key': '.......',
-            //     },
-            //     body: req.method === 'get' ? undefined : JSON.stringify(req.json),
-            // }).then(
-            //     response =>
-            //         response.json().then(
-            //             json => ({status: response.status, data: json}),
-            //             err =>
-            //                 response.ok ? {status: 'JsonParseError', data: err} : {status: response.status, data: err},
-            //         ),
-            //     err => ({status: 'ConnectionFailed', data: err}),
-            // );
+            /* you can use es6 fetch/axios/fake fetch or anything you want */
+            // return fakeFetch(req);
+            return fetcher(req);
         },
     });
 
@@ -277,6 +271,7 @@ function UserProfilePage() {
 function MyProfilePage() {
     const profile = useSuspense().getProfile(); // Box<"Success", Profile>
     const [logoutResult, logout] = useMutation(mut => mut.logout());
+    // logoutResult: Box<"Empty"> | Box<"Loading"> | Box<"Success", unknown>
     return (
         <h1>
             Hello {profile.value.name}
@@ -321,8 +316,9 @@ function ErrorView(props: {children: React.ReactNode; tryAgain?: () => void}) {
 // Utility to wrap auth zones with boundary.
 // If authRequired response will be thrown in a deep component then LoginForm will be shown
 const AuthZone = createBoundary(function AuthZone(props) {
-    if (props.error !== null) {
-        if (restApiFactory.isResponseError(props.error) && props.error.box.type === 'AuthRequired') {
+    const err = props.error;
+    if (err !== null) {
+        if (restApiFactory.isResponseError(err) && err.response.responseValue.type === 'AuthRequired') {
             return <LoginForm onLogin={props.resetError} />;
         }
         // rethrow error to upper ErrorBoundary if other error
@@ -342,16 +338,17 @@ const ErrorBoundary = createBoundary(
         const error = props.error;
         if (error !== null) {
             if (restApiFactory.isResponseError(error)) {
-                if (error.box.type === 'ServerError') {
+                const res = error.response.responseValue;
+                if (res.type === 'ServerError') {
                     return <ErrorView tryAgain={tryAgain}>Internal Server Error</ErrorView>;
                 }
-                if (error.box.type === 'ConnectionFailed') {
+                if (res.type === 'ConnectionFailed') {
                     return <ErrorView tryAgain={tryAgain}>Connection Failed</ErrorView>;
                 }
-                if (error.box.type === 'UnacceptableResponse') {
+                if (res.type === 'UnacceptableResponse') {
                     return <ErrorView>Unacceptable Response</ErrorView>;
                 }
-                if (error.box.type === 'NotFound') {
+                if (res.type === 'NotFound') {
                     return <ErrorView>Not Found</ErrorView>;
                 }
             }
@@ -361,21 +358,35 @@ const ErrorBoundary = createBoundary(
     },
     {
         didCatch: (error: Error, errorInfo: React.ErrorInfo) => {
-            console.error(error, errorInfo.componentStack);
+            if (restApiFactory.isResponseError(error)) {
+                console.error(error, error.response, errorInfo.componentStack);
+            } else {
+                console.error(error, errorInfo.componentStack);
+            }
         },
     },
 );
+
+const fetcher: Fetcher = req =>
+    fetch('https://yourdomain/' + req.url, {
+        method: req.method,
+        headers: {
+            'Content-Type': 'application/json',
+            'api-key': '.......',
+        },
+        body: req.method === 'get' ? undefined : JSON.stringify(req.body),
+    }).then(res => (res.status < 500 ? res.json() : null));
 
 // Fake fetch
 let logged = false;
 let serverErrored = true;
 const fakeFetch = fakeFetchFactory({
     wait: 500,
-    handler: (method, url, params, res) => {
-        console.log('fetch', method, url, params);
+    handler: (req, res) => {
+        console.log('fetch', req.method, req.url, req.body);
         // if you want test connection failed
-        // return res('Failed', null);
-        switch (url) {
+        // return res('ConnectionFailed', null);
+        switch (req.url) {
             case 'login':
                 logged = true;
                 // emulate 500 error on first login time
