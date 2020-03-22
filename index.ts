@@ -35,25 +35,6 @@ export type ResponseData<T extends Box = Box> = {
     request: RawRequest;
 };
 
-type ResMethods<T extends Box, Res> = {
-    ResultType: Res;
-    matchers: Matcher<string, string, unknown, unknown>[];
-    on<K extends T['type'], R extends Box>(k: K, val: (val: Extract<T, Box<K>>['value']) => R): ResMethods<T, Res | R>;
-    onSuccess<R>(): ResMethods<T, Res | Box<'Success', R>>;
-    onSuccessTyped<R>(validator: (val: unknown) => R): ResMethods<T, Res | Box<'Success', R>>;
-    passthrough<K extends T['type']>(k: K): ResMethods<T, Res | Extract<T, Box<K>>>;
-    passthroughTyped<K extends T['type'], R>(k: K, validator: (val: unknown) => R): ResMethods<T, Res | Box<K, R>>;
-    passthroughNamed<K extends T['type'], K2 extends string>(
-        from: K,
-        to: K2,
-    ): ResMethods<T, Res | Box<K2, Extract<T, Box<K>>['value']>>;
-    passthroughNamedTyped<K extends T['type'], K2 extends string, R>(
-        k: K,
-        to: K2,
-        validator: (val: unknown) => R,
-    ): ResMethods<T, Res | Box<K2, R>>;
-};
-
 let globalMeta!: {name: string; params: unknown; callback: (item: QueryCacheItem) => void};
 export type Api<Q extends ReqMapQuery, M extends ReqMapMut> = {
     query: (
@@ -89,7 +70,6 @@ export type RawRequest = {
 };
 
 type ReqMethods<R> = {
-    get: (url: string, queryParams?: {[key: string]: number | string | boolean} | null) => R;
     post: (url: string, params?: object) => R;
     put: (url: string, params?: object) => R;
     delete: (url: string, params?: object) => R;
@@ -99,19 +79,16 @@ const cacheItemToListenersMap = new Map<QueryCacheItem, Set<(item: QueryCacheIte
 const listenerToCacheItemMap = new Map<(item: QueryCacheItem) => void, QueryCacheItem>();
 const promiseCache = new Map<string, Promise<ResponseData<Box>>>();
 
-type QUtils<BoxedResponse extends Box> = ReqMethods<ResponseData<BoxedResponse>>;
 type MUtils<BoxedResponse extends Box, Q extends ReqMapQuery> = ReqMethods<Promise<ResponseData<BoxedResponse>>> & {
     cache: Cache<Q>;
 };
-
-const Success = 'Success';
 
 type ErroredBox = Box<'ConnectionFailed', Error> | Box<'UnacceptableResponse', Error>;
 export function createApiFactory() {
     return {
         group<BoxedResponse extends Box>(groupToBox: (x: FetchResponseOk) => BoxedResponse) {
             return {
-                query<Q extends ReqMapQuery>(q: (r: QUtils<BoxedResponse>) => Q) {
+                query<Q extends ReqMapQuery>(q: (r: GetQuery<BoxedResponse>) => Q) {
                     return {
                         mutation<M extends ReqMapMut>(m: (r: MUtils<BoxedResponse, Q>) => M) {
                             const factory = (config: RestApiConfig): Api<Q, M> => {
@@ -154,7 +131,14 @@ export function createApiFactory() {
                                         cache: cache,
                                     }),
                                     query: createSuspenses(
-                                        q(reqMethods(req => query(req, fetch, queryCache, defaultTTL))),
+                                        q((url, queryParams) =>
+                                            query(
+                                                createRawRequest('get', url + queryString(queryParams), null),
+                                                fetch,
+                                                queryCache,
+                                                defaultTTL,
+                                            ),
+                                        ),
                                     ),
                                 };
                             };
@@ -241,7 +225,8 @@ function queryString(obj: {[key: string]: number | string | boolean} | null | un
     if (typeof obj === 'object' && obj !== null) {
         const arr: string[] = [];
         for (const key in obj) {
-            arr.push(`key=${obj[key]}`);
+            const val = obj[key];
+            arr.push(`${key}=${typeof val === 'boolean' ? 1 : val}`);
         }
         return arr.length > 0 ? '?' + arr.join('&') : '';
     }
@@ -249,30 +234,10 @@ function queryString(obj: {[key: string]: number | string | boolean} | null | un
 }
 
 const reqMethods = <R>(fetcher: (req: RawRequest) => R): ReqMethods<R> => ({
-    get: (url, params) => fetcher(createRawRequest('get', url + queryString(params), null)),
     put: (url, params) => fetcher(createRawRequest('put', url, params)),
     post: (url, params) => fetcher(createRawRequest('post', url, params)),
     delete: (url, params) => fetcher(createRawRequest('delete', url, params)),
 });
-
-const createResMethods = <BoxedResponse extends Box, Res>(
-    items: {on: string; handler: (val: unknown) => Box}[] = [],
-): ResMethods<BoxedResponse, Res> => {
-    return {
-        ResultType: cast(null),
-        matchers: items,
-        on: (k, handler) => createResMethods([...items, {on: k, handler: handler}]),
-        onSuccess: () => createResMethods([...items, {on: Success, handler: val => box(Success, val)}]),
-        onSuccessTyped: validator =>
-            createResMethods([...items, {on: Success, handler: val => box(Success, validator(val))}]),
-        passthrough: k => createResMethods([...items, {on: k, handler: val => box(k, val)}]),
-        passthroughTyped: (k, validator) =>
-            createResMethods([...items, {on: k, handler: val => box(k, validator(val))}]),
-        passthroughNamed: (k1, k2) => createResMethods([...items, {on: k1, handler: val => box(k2, val)}]),
-        passthroughNamedTyped: (k1, k2, validator) =>
-            createResMethods([...items, {on: k1, handler: val => box(k2, validator(val))}]),
-    };
-};
 
 function query<R extends Box>(
     req: RawRequest,
@@ -281,7 +246,7 @@ function query<R extends Box>(
     defaultTTL: number,
 ): ResponseData<R> {
     const {url} = req;
-    const ttl = req.ttl ?? defaultTTL;
+    const ttl = req.ttl === null ? defaultTTL : req.ttl;
     const promise = promiseCache.get(url);
     if (promise !== undefined) {
         throw promise;
@@ -300,15 +265,15 @@ function query<R extends Box>(
         promiseCache.set(url, promise);
         const res = promise
             .then(
-                box => kind('data', box),
-                (err: Error) => kind('error', err),
+                val => box('data', val),
+                (err: Error) => box('error', err),
             )
             .then(
                 res => {
                     if (ttl > 0) {
                         const item: QueryCacheItem = {
-                            response: res.kind === 'data' ? res.value : null,
-                            error: res.kind === 'error' ? res.value : null,
+                            response: res.type === 'data' ? res.value : null,
+                            error: res.type === 'error' ? res.value : null,
                             request: {request: req, name: globalMeta.name, params: globalMeta.params},
                             lastAccess: Date.now() - requestedAt.getTime(),
                             loadingDur: Date.now() - requestedAt.getTime(),
@@ -339,10 +304,6 @@ function query<R extends Box>(
     throw new Error('never');
 }
 
-function kind<Kind extends string, T>(kind: Kind, value: T) {
-    return {kind: kind, value: value};
-}
-
 export function createReactApiTools<Config, Q extends ReqMapQuery, M extends ReqMapMut>(
     _apiFactory: (config: Config, cache: QueryCache) => Api<Q, M>,
 ) {
@@ -352,7 +313,7 @@ export function createReactApiTools<Config, Q extends ReqMapQuery, M extends Req
         ApiProvider: (props: {api: Api<Q, M>; children: React.ReactNode}) =>
             React.createElement(context.Provider, {value: props.api, children: props.children}),
         useApi: () => React.useContext(context),
-        useSuspense: () => {
+        useQuery: () => {
             const [, setState] = React.useState(null);
             const cb: (item: QueryCacheItem) => void = cast(setState);
             React.useEffect(
@@ -403,11 +364,6 @@ export function createReactApiTools<Config, Q extends ReqMapQuery, M extends Req
     };
 }
 
-type Matcher<FromK extends string, ToK extends string, FromT, ToT> = {
-    on: FromK;
-    handler: (res: FromT) => Box<ToK, ToT>;
-};
-
 export type Box<K extends string = string, V = unknown> = {type: K; value: V};
 export function box<K extends string, V>(type: K, value: V): Box<K, V> {
     return {type: type, value: value};
@@ -450,3 +406,8 @@ export class ApiError<T extends Box = Box> extends Error {
 function cast<T>(val: unknown) {
     return val as T;
 }
+
+export type GetQuery<T extends Box> = (
+    url: string,
+    queryParams?: {[key: string]: string | number | boolean},
+) => ResponseData<T>;
