@@ -23,10 +23,10 @@ type RestApiConfig = {
 };
 
 type ReqMapQuery = {
-    [key: string]: (params: any) => Box;
+    [key: string]: (params: any) => ResponseData<Box>;
 };
 type ReqMapMut = {
-    [key: string]: (params: any) => Promise<Box>;
+    [key: string]: (params: any) => Promise<ResponseData<Box>>;
 };
 
 export type ResponseData<T extends Box = Box> = {
@@ -36,11 +36,15 @@ export type ResponseData<T extends Box = Box> = {
 };
 
 let globalMeta!: {name: string; params: unknown; callback: (item: QueryCacheItem) => void};
-export type Api<Q extends ReqMapQuery, M extends ReqMapMut> = {
-    query: (
+export type Api<Groups extends Box, Q extends ReqMapQuery, M extends ReqMapMut> = {
+    Groups: Groups;
+    query: <Filter extends Groups['type']>(
         onCacheDelete: (item: QueryCacheItem) => void,
+        filters?: Filter[],
     ) => {
-        [P in keyof Q]: (params: Q[P] extends () => any ? void : Parameters<Q[P]>[0]) => ReturnType<Q[P]>;
+        [P in keyof Q]: (
+            params: Q[P] extends () => any ? void : Parameters<Q[P]>[0],
+        ) => Extract<ReturnType<Q[P]>['responseValue'], Box<Ok | Filter>>;
     };
     mutation: M;
     cache: Cache<Q>;
@@ -69,31 +73,43 @@ export type RawRequest = {
     ttl: number | null;
 };
 
-type ReqMethods<R> = {
-    post: (url: string, params?: object) => R;
-    put: (url: string, params?: object) => R;
-    delete: (url: string, params?: object) => R;
+const Ok = 'Ok';
+type Ok = typeof Ok;
+const Success = 'Success';
+type Success = typeof Success;
+
+type ReqMethods<Groupped extends Box> = {
+    post: <T>(url: string, params?: object | null, transform?: () => T) => Promise<ResponseData<Groupped | Box<Ok, T>>>;
+    put: <T>(url: string, params?: object | null, transform?: () => T) => Promise<ResponseData<Groupped | Box<Ok, T>>>;
+    delete: <T>(
+        url: string,
+        params?: object | null,
+        transform?: () => T,
+    ) => Promise<ResponseData<Groupped | Box<Ok, T>>>;
 };
 
 const cacheItemToListenersMap = new Map<QueryCacheItem, Set<(item: QueryCacheItem) => void>>();
 const listenerToCacheItemMap = new Map<(item: QueryCacheItem) => void, QueryCacheItem>();
 const promiseCache = new Map<string, Promise<ResponseData<Box>>>();
 
-type MUtils<BoxedResponse extends Box, Q extends ReqMapQuery> = ReqMethods<Promise<ResponseData<BoxedResponse>>> & {
+type MUtils<BoxedResponse extends Box, Q extends ReqMapQuery> = ReqMethods<BoxedResponse> & {
     cache: Cache<Q>;
 };
 
 type ErroredBox = Box<'ConnectionFailed', Error> | Box<'UnacceptableResponse', Error>;
 export function createApiFactory() {
     return {
-        group<BoxedResponse extends Box>(groupToBox: (x: FetchResponseOk) => BoxedResponse) {
+        group<Groups extends Box>(groupToBox: (x: FetchResponseOk) => Groups) {
             return {
-                query<Q extends ReqMapQuery>(q: (r: GetQuery<BoxedResponse>) => Q) {
+                query<Q extends ReqMapQuery>(q: (r: GetQuery<Groups>) => Q) {
                     return {
-                        mutation<M extends ReqMapMut>(m: (r: MUtils<BoxedResponse, Q>) => M) {
-                            const factory = (config: RestApiConfig): Api<Q, M> => {
+                        mutation<M extends ReqMapMut>(m: (r: MUtils<Groups, Q>) => M) {
+                            const factory = (config: RestApiConfig): Api<Groups, Q, M> => {
                                 const {fetcher, queryCache = new Map(), defaultTTL = 600_000} = config;
-                                const fetch: (req: RawRequest) => Promise<ResponseData<BoxedResponse>> = req =>
+                                const fetch: <T>(
+                                    req: RawRequest,
+                                    transform?: (val: unknown) => T,
+                                ) => Promise<ResponseData<Groups>> = (req, transform) =>
                                     fetcher(req)
                                         .catch<FetchResponse>(err => {
                                             if (err instanceof SyntaxError && err.message.match(/JSON/)) {
@@ -116,48 +132,63 @@ export function createApiFactory() {
                                                     status: 0,
                                                 });
                                             }
+                                            const res = groupToBox(data);
+
                                             return {
                                                 status: data.status,
                                                 request: req,
-                                                responseValue: groupToBox(data),
+                                                responseValue: cast(
+                                                    res.type === Success
+                                                        ? box(Ok, transform ? transform(res.value) : res.value)
+                                                        : res,
+                                                ),
                                             };
                                         });
 
                                 const cache = createCache(queryCache);
                                 return {
+                                    Groups: cast(null),
                                     cache: cache,
                                     mutation: m({
                                         ...reqMethods(fetch),
                                         cache: cache,
                                     }),
-                                    query: createSuspenses(
-                                        q((url, queryParams) =>
-                                            query(
-                                                createRawRequest('get', url + queryString(queryParams), null),
-                                                fetch,
-                                                queryCache,
-                                                defaultTTL,
+                                    query: cast<any>(
+                                        createSuspenses(
+                                            q((url, queryParams, transform) =>
+                                                query(
+                                                    createRawRequest('get', url + queryString(queryParams), null),
+                                                    cast(fetch),
+                                                    transform,
+                                                    queryCache,
+                                                    defaultTTL,
+                                                ),
                                             ),
                                         ),
                                     ),
                                 };
                             };
-                            factory.isResponseError = (
-                                value: unknown,
-                            ): value is ApiError<BoxedResponse | ErroredBox> => {
+                            factory.isResponseError = (value: unknown): value is ApiError<Groups | ErroredBox> => {
                                 return value instanceof ApiError;
                             };
                             return factory;
 
                             function createSuspenses(methods: ReqMapQuery) {
-                                return (cacheDeleteListener: (item: QueryCacheItem) => void) => {
-                                    const suspense = {} as ReturnType<Api<Q, M>['query']>;
+                                return (cacheDeleteListener: (item: QueryCacheItem) => void, filters?: string) => {
+                                    const suspense = {} as ReturnType<Api<Groups, Q, M>['query']>;
                                     for (const key in methods) {
                                         const k = key as keyof Q;
                                         const doRequest = methods[key];
                                         suspense[k] = cast((params: any) => {
                                             globalMeta = {name: key, params: params, callback: cacheDeleteListener};
-                                            return doRequest(params);
+                                            const res = doRequest(params);
+                                            if (
+                                                res.responseValue.type !== Ok &&
+                                                (!filters || filters.indexOf(res.responseValue.type) === -1)
+                                            ) {
+                                                throw new ApiError(res);
+                                            }
+                                            return res.responseValue;
                                         });
                                     }
                                     return suspense;
@@ -233,15 +264,18 @@ function queryString(obj: {[key: string]: number | string | boolean} | null | un
     return '';
 }
 
-const reqMethods = <R>(fetcher: (req: RawRequest) => R): ReqMethods<R> => ({
-    put: (url, params) => fetcher(createRawRequest('put', url, params)),
-    post: (url, params) => fetcher(createRawRequest('post', url, params)),
-    delete: (url, params) => fetcher(createRawRequest('delete', url, params)),
+const reqMethods = <Groupped extends Box>(
+    fetcher: <T>(req: RawRequest, transform?: (val: unknown) => T) => Promise<ResponseData<Groupped | Box<Ok, T>>>,
+): ReqMethods<Groupped> => ({
+    put: (url, params, transform) => fetcher(createRawRequest('put', url, params), transform),
+    post: (url, params, transform) => fetcher(createRawRequest('post', url, params), transform),
+    delete: (url, params, transform) => fetcher(createRawRequest('delete', url, params), transform),
 });
 
-function query<R extends Box>(
+function query<T, R extends Box>(
     req: RawRequest,
     fetch: (req: RawRequest) => Promise<ResponseData<R>>,
+    transform: ((val: unknown) => T) | undefined,
     queryCache: QueryCache,
     defaultTTL: number,
 ): ResponseData<R> {
@@ -272,7 +306,21 @@ function query<R extends Box>(
                 res => {
                     if (ttl > 0) {
                         const item: QueryCacheItem = {
-                            response: res.type === 'data' ? res.value : null,
+                            response:
+                                res.type === 'data'
+                                    ? {
+                                          ...res.value,
+                                          responseValue:
+                                              res.value.responseValue.type === Success
+                                                  ? box(
+                                                        Ok,
+                                                        transform
+                                                            ? transform(res.value.responseValue.value)
+                                                            : res.value.responseValue.value,
+                                                    )
+                                                  : res.value.responseValue,
+                                      }
+                                    : null,
                             error: res.type === 'error' ? res.value : null,
                             request: {request: req, name: globalMeta.name, params: globalMeta.params},
                             lastAccess: Date.now() - requestedAt.getTime(),
@@ -304,16 +352,16 @@ function query<R extends Box>(
     throw new Error('never');
 }
 
-export function createReactApiTools<Config, Q extends ReqMapQuery, M extends ReqMapMut>(
-    _apiFactory: (config: Config, cache: QueryCache) => Api<Q, M>,
+export function createReactApiTools<Config, Groups extends Box, Q extends ReqMapQuery, M extends ReqMapMut>(
+    _apiFactory: (config: Config, cache: QueryCache) => Api<Groups, Q, M>,
 ) {
-    const context = React.createContext(cast<Api<Q, M>>(null));
+    const context = React.createContext(cast<Api<Groups, Q, M>>(null));
     return {
         apiContext: context,
-        ApiProvider: (props: {api: Api<Q, M>; children: React.ReactNode}) =>
+        ApiProvider: (props: {api: Api<Groups, Q, M>; children: React.ReactNode}) =>
             React.createElement(context.Provider, {value: props.api, children: props.children}),
         useApi: () => React.useContext(context),
-        useQuery: () => {
+        useQuery: <Filter extends Groups['type'] = never>(filters?: Filter[]) => {
             const [, setState] = React.useState(null);
             const cb: (item: QueryCacheItem) => void = cast(setState);
             React.useEffect(
@@ -330,17 +378,21 @@ export function createReactApiTools<Config, Q extends ReqMapQuery, M extends Req
                 [],
             );
             const api = React.useContext(context);
-            return api.query(cb);
+            return api.query<Filter>(cb, filters);
         },
-        useMutation: <R extends Box<N, unknown>, N extends string>(
-            fn: (mut: Api<Q, M>['mutation']) => Promise<R>,
-        ): [R | Box<'Empty', void> | Box<'Loading', void>, () => void] => {
+
+        useMutation: <R extends Box, Filter extends Groups['type'] = never>(
+            fn: (api: Api<Groups, Q, M>['mutation']) => Promise<ResponseData<R>>,
+            onSuccess?: (data: R) => void,
+            filters?: Filter[],
+        ): [Box<'Empty', void> | Box<'Loading', void> | Extract<R, Box<Ok | Filter>>, () => void] => {
             const [state, setState] = React.useState<
-                Box<'Empty', void> | Box<'Loading', void> | Box<'Error', Error> | R
+                Box<'Empty', void> | Box<'Loading', void> | Extract<R, Box<Ok | Filter>>
             >(box('Empty', undefined));
+            const [err, setErr] = React.useState<Error | null>(null);
             const api = React.useContext(context);
-            if (state.type === 'Error') {
-                throw state.value;
+            if (err !== null) {
+                throw err;
             }
             let mounted = true;
             React.useEffect(
@@ -355,8 +407,22 @@ export function createReactApiTools<Config, Q extends ReqMapQuery, M extends Req
                     const promise = fn(api.mutation);
                     setState(box('Loading', undefined));
                     promise.then(
-                        res => (mounted ? setState(res) : null),
-                        (err: Error) => (mounted ? setState(box('Error', err)) : null),
+                        res => {
+                            if (mounted) {
+                                if (
+                                    res.responseValue.type !== Ok &&
+                                    (!filters || filters.indexOf(cast(res.responseValue.type)) === -1)
+                                ) {
+                                    setErr(new ApiError(res));
+                                } else {
+                                    setState(cast(res.responseValue));
+                                    if (onSuccess && res.responseValue.type === Ok) {
+                                        onSuccess(res.responseValue);
+                                    }
+                                }
+                            }
+                        },
+                        (err: Error) => (mounted ? setErr(err) : null),
                     );
                 },
             ];
@@ -407,7 +473,8 @@ function cast<T>(val: unknown) {
     return val as T;
 }
 
-export type GetQuery<T extends Box> = (
+export type GetQuery<Groupped extends Box> = <T>(
     url: string,
     queryParams?: {[key: string]: string | number | boolean},
-) => ResponseData<T>;
+    transform?: () => T,
+) => ResponseData<Groupped | Box<Ok, T>>;
